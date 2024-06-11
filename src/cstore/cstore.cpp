@@ -38,6 +38,8 @@
 #include <cparse/cparse.hpp>
 #include <commit/commit-algorithm.hpp>
 
+#include <syslog.h>
+
 namespace cstore { // begin namespace cstore
 
 using namespace cnode;
@@ -585,16 +587,16 @@ Cstore::getAllowedVarRef(string& astr){
   size_t varloc = 0;
   size_t strloc = 0;
   vtw_type_e vtype = ERROR_TYPE;
-  string exe_string = ""; 
-  string varref = ""; 
+  string exe_string = "";
+  string varref = "";
   size_t first_paren, second_paren;
   while(true) {
-    varloc = astr.find("$VAR", strloc); 
+    varloc = astr.find("$VAR", strloc);
     if (varloc == string::npos){
       varloc = astr.size();
       exe_string += astr.substr(strloc, (varloc-strloc+1));
       break;
-    }   
+    }
     exe_string += astr.substr(strloc, (varloc-strloc));
     strloc = varloc;
     first_paren = astr.find('(', strloc);
@@ -1194,7 +1196,7 @@ Cstore::cfgPathExists(const Cpath& path_comps, bool active_cfg)
   return cfg_path_exists(path_comps, active_cfg, false);
 }
 
-// same as above but "deactivate-aware" 
+// same as above but "deactivate-aware"
 bool
 Cstore::cfgPathExistsDA(const Cpath& path_comps, bool active_cfg,
                         bool include_deactivated)
@@ -1401,7 +1403,7 @@ Cstore::cfgPathGetChildNodes(const Cpath& path_comps, vector<string>& cnodes,
   cfgPathGetChildNodesDA(path_comps, cnodes, active_cfg, false);
 }
 
-// same as above but "deactivate-aware" 
+// same as above but "deactivate-aware"
 void
 Cstore::cfgPathGetChildNodesDA(const Cpath& path_comps, vector<string>& cnodes,
                                bool active_cfg, bool include_deactivated)
@@ -1445,7 +1447,7 @@ Cstore::cfgPathGetValue(const Cpath& path_comps, string& value,
   return cfgPathGetValueDA(path_comps, value, active_cfg, false);
 }
 
-// same as above but "deactivate-aware" 
+// same as above but "deactivate-aware"
 bool
 Cstore::cfgPathGetValueDA(const Cpath& path_comps, string& value,
                           bool active_cfg, bool include_deactivated)
@@ -1507,7 +1509,7 @@ Cstore::cfgPathGetValues(const Cpath& path_comps, vector<string>& values,
   return cfgPathGetValuesDA(path_comps, values, active_cfg, false);
 }
 
-// same as above but "deactivate-aware" 
+// same as above but "deactivate-aware"
 bool
 Cstore::cfgPathGetValuesDA(const Cpath& path_comps, vector<string>& values,
                            bool active_cfg, bool include_deactivated)
@@ -3139,6 +3141,7 @@ Cstore::voutput_internal(const char *fmt, va_list alist)
       break;
     }
     vfprintf(fout, fmt, alist);
+    vsyslog(LOG_INFO, fmt, alist);
   } while (0);
   if (fout) {
     fclose(fout);

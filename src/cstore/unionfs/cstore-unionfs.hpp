@@ -64,6 +64,7 @@ private:
   // constants
   static const string C_ENV_TMPL_ROOT;
   static const string C_ENV_WORK_ROOT;
+  static const string C_ENV_OVERLAY_WORKDIR_ROOT;
   static const string C_ENV_ACTIVE_ROOT;
   static const string C_ENV_CHANGE_ROOT;
   static const string C_ENV_TMP_ROOT;
@@ -73,6 +74,7 @@ private:
   static const string C_DEF_ACTIVE_ROOT;
   static const string C_DEF_CHANGE_PREFIX;
   static const string C_DEF_WORK_PREFIX;
+  static const string C_DEF_OVERLAY_WORKDIR_PREFIX;
   static const string C_DEF_TMP_PREFIX;
 
   static const string C_MARKER_DEF_VALUE;
@@ -83,6 +85,7 @@ private:
   static const string C_COMMITTED_MARKER_FILE;
   static const string C_COMMENT_FILE;
   static const string C_TAG_NAME;
+
   static const string C_VAL_NAME;
   static const string C_DEF_NAME;
   static const string C_COMMIT_LOCK_FILE;
@@ -93,9 +96,11 @@ private:
   static const size_t C_UNIONFS_MAX_FILE_SIZE = 262144;
 
   // root dirs (constant)
-  FsPath work_root;   // working root (union)
-  FsPath active_root; // active root (readonly part of union)
-  FsPath change_root; // change root (r/w part of union)
+  FsPath work_root;   // working root (union) <- new config
+  FsPath active_root; // active root (readonly part of union) <- lower
+  FsPath change_root; // change root (r/w part of union) <- upper
+  FsPath overlayfs_workdir; // change root (r/w part of union) <- workdir
+
   FsPath tmp_root;    // temp root
   FsPath tmpl_root;   // template root
 
@@ -109,14 +114,8 @@ private:
   FsPath tmp_active_root;
   FsPath tmp_work_root;
   FsPath commit_marker_file;
-  void init_commit_data() {
-    tmp_active_root = tmp_root;
-    tmp_work_root = tmp_root;
-    commit_marker_file = tmp_root;
-    tmp_active_root.push("active");
-    tmp_work_root.push("work");
-    commit_marker_file.push(C_COMMITTED_MARKER_FILE);
-  }
+
+  void init_commit_data();
   bool construct_commit_active(commit::PrioNode& node);
   bool mark_dir_changed(const FsPath& d, const FsPath& root);
   bool sync_dir(const FsPath& src, const FsPath& dst, const FsPath& root);
@@ -160,7 +159,7 @@ private:
     if (to_root){
       char *val;
       if ((val = getenv(C_ENV_TMPL_ROOT.c_str()))) {
-        tmpl_path = val; 
+        tmpl_path = val;
       } else {
         tmpl_path = C_DEF_TMPL_ROOT;
       }
@@ -292,7 +291,7 @@ private:
                           bool filter_dot_entries = false);
   void get_committed_marker(bool is_delete, string& marker);
   bool find_line_in_file(const FsPath& file, const string& line);
-  bool do_mount(const FsPath& rwdir, const FsPath& rdir, const FsPath& mdir);
+  bool do_mount(const FsPath& rwdir, const FsPath& rdir, const FsPath& mdir, const FsPath& overlayfs_workdir);
   bool do_umount(const FsPath& mdir);
 
   // boost fs operations wrappers

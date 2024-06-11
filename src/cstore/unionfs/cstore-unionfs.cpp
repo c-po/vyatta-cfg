@@ -35,13 +35,18 @@
 #include <cnode/cnode.hpp>
 #include <commit/commit-algorithm.hpp>
 
+#include <syslog.h>
+
 namespace cstore { // begin namespace cstore
 namespace unionfs { // begin namespace unionfs
+
+#define DEBUG_LOG syslog(LOG_INFO, "%s:%i DEBUG", __func__, __LINE__)
 
 ////// constants
 // environment vars defining root dirs
 const string UnionfsCstore::C_ENV_TMPL_ROOT = "VYATTA_CONFIG_TEMPLATE";
 const string UnionfsCstore::C_ENV_WORK_ROOT = "VYATTA_TEMP_CONFIG_DIR";
+const string UnionfsCstore::C_ENV_OVERLAY_WORKDIR_ROOT = "VYATTA_OVERLAY_WORKDIR_TMP";
 const string UnionfsCstore::C_ENV_ACTIVE_ROOT
   = "VYATTA_ACTIVE_CONFIGURATION_DIR";
 const string UnionfsCstore::C_ENV_CHANGE_ROOT = "VYATTA_CHANGES_ONLY_DIR";
@@ -54,10 +59,12 @@ const string UnionfsCstore::C_DEF_CFG_ROOT
   = "/opt/vyatta/config";
 const string UnionfsCstore::C_DEF_ACTIVE_ROOT
   = UnionfsCstore::C_DEF_CFG_ROOT + "/active";
-const string UnionfsCstore::C_DEF_CHANGE_PREFIX 
+const string UnionfsCstore::C_DEF_CHANGE_PREFIX
   = UnionfsCstore::C_DEF_CFG_ROOT + "/tmp/changes_only_";
 const string UnionfsCstore::C_DEF_WORK_PREFIX
   = UnionfsCstore::C_DEF_CFG_ROOT + "/tmp/new_config_";
+const string UnionfsCstore::C_DEF_OVERLAY_WORKDIR_PREFIX
+  = UnionfsCstore::C_DEF_CFG_ROOT + "/tmp/overlay_workdir_";
 const string UnionfsCstore::C_DEF_TMP_PREFIX
   = UnionfsCstore::C_DEF_CFG_ROOT + "/tmp/tmp_";
 
@@ -250,6 +257,9 @@ UnionfsCstore::UnionfsCstore(bool use_edit_level)
   if ((val = getenv(C_ENV_CHANGE_ROOT.c_str()))) {
     change_root = val;
   }
+  if ((val = getenv(C_ENV_OVERLAY_WORKDIR_ROOT.c_str()))) {
+    overlayfs_workdir = val;
+  }
   /* note: the original perl API module does not use the edit levels
    *       from environment. only the actual CLI operations use them.
    *       so here make it an option.
@@ -297,8 +307,13 @@ UnionfsCstore::UnionfsCstore(const string& sid, string& env)
   tmpl_path = tmpl_root;
   active_root = C_DEF_ACTIVE_ROOT;
   work_root = (C_DEF_WORK_PREFIX + sid);
+  overlayfs_workdir = (C_DEF_OVERLAY_WORKDIR_PREFIX + sid);
   change_root = (C_DEF_CHANGE_PREFIX + sid);
   tmp_root = (C_DEF_TMP_PREFIX + sid);
+
+  openlog("vyatta-cfg", LOG_PID, LOG_USER);
+  syslog(LOG_INFO, "%s:%i %s", __func__, __LINE__, overlayfs_workdir.path_cstr());
+
   init_commit_data();
 
   string declr = " declare -x -r "; // readonly vars
@@ -306,9 +321,12 @@ UnionfsCstore::UnionfsCstore(const string& sid, string& env)
   env += (declr + C_ENV_ACTIVE_ROOT + "=" + active_root.path_cstr());
   env += (declr + C_ENV_CHANGE_ROOT + "=" + change_root.path_cstr() + ";");
   env += (declr + C_ENV_WORK_ROOT + "=" + work_root.path_cstr() + ";");
+  env += (declr + C_ENV_OVERLAY_WORKDIR_ROOT + "=" + overlayfs_workdir.path_cstr() + ";");
   env += (declr + C_ENV_TMP_ROOT + "=" + tmp_root.path_cstr() + ";");
   env += (declr + C_ENV_TMPL_ROOT + "=" + tmpl_root.path_cstr() + ";");
   env += " } >&/dev/null || true";
+
+  DEBUG_LOG;
 
   // set up path strings using level vars
   char *val;
@@ -323,17 +341,22 @@ UnionfsCstore::UnionfsCstore(const string& sid, string& env)
   }
   orig_mutable_cfg_path = mutable_cfg_path;
   orig_tmpl_path = tmpl_path;
+  DEBUG_LOG;
   _init_fs_escape_chars();
+  DEBUG_LOG;
 }
 
 UnionfsCstore::~UnionfsCstore()
 {
+  DEBUG_LOG;
+  closelog();
 }
 
 ////// public virtual functions declared in base class
 bool
 UnionfsCstore::markSessionUnsaved()
 {
+  DEBUG_LOG;
   FsPath marker = work_root;
   marker.push(C_MARKER_UNSAVED);
   if (path_exists(marker)) {
@@ -350,6 +373,7 @@ UnionfsCstore::markSessionUnsaved()
 bool
 UnionfsCstore::unmarkSessionUnsaved()
 {
+  DEBUG_LOG;
   FsPath marker = work_root;
   marker.push(C_MARKER_UNSAVED);
   if (!path_exists(marker)) {
@@ -368,6 +392,7 @@ UnionfsCstore::unmarkSessionUnsaved()
 bool
 UnionfsCstore::sessionUnsaved()
 {
+  DEBUG_LOG;
   FsPath marker = work_root;
   marker.push(C_MARKER_UNSAVED);
   return path_exists(marker);
@@ -376,6 +401,7 @@ UnionfsCstore::sessionUnsaved()
 bool
 UnionfsCstore::sessionChanged()
 {
+  DEBUG_LOG;
   FsPath marker = work_root;
   marker.push(C_MARKER_CHANGED);
   return path_exists(marker);
@@ -388,6 +414,7 @@ UnionfsCstore::sessionChanged()
 bool
 UnionfsCstore::setupSession()
 {
+  DEBUG_LOG;
   vector<FsPath> directories;
   vector<int> pids;
   vector<int> old_pids;
@@ -416,6 +443,7 @@ UnionfsCstore::setupSession()
     try {
       b_fs::create_directories(work_root.path_cstr());
       b_fs::create_directories(change_root.path_cstr());
+      b_fs::create_directories(overlayfs_workdir.path_cstr());
       b_fs::create_directories(tmp_root.path_cstr());
       if (!path_exists(active_root)) {
         // this should only be needed on boot
@@ -427,7 +455,7 @@ UnionfsCstore::setupSession()
     }
 
     // union mount
-    if (!do_mount(change_root, active_root, work_root)) {
+    if (!do_mount(change_root, active_root, work_root, overlayfs_workdir)) {
       return false;
     }
   } else if (!path_is_directory(work_root)) {
@@ -525,17 +553,30 @@ UnionfsCstore::teardownSession()
   }
 
   // remove session directories
-  bool ret = false;
-  try {
-    if (b_fs::remove_all(work_root.path_cstr()) != 0
-        && b_fs::remove_all(change_root.path_cstr()) != 0
-        && b_fs::remove_all(tmp_root.path_cstr()) != 0) {
-      ret = true;
-    }
-  } catch (...) {
+  bool ret = true;
+  bool rc = false;
+
+  rc = (bool)(b_fs::remove_all(work_root.path_cstr()) != 0);
+  if (!rc) {
+    output_internal("failed to remove %s\n", work_root.path_cstr());
+    ret = false;
   }
-  if (!ret) {
-    output_internal("failed to remove session directories\n");
+  rc = (bool)(b_fs::remove_all(change_root.path_cstr()) != 0);
+  if (!rc) {
+    output_internal("failed to remove %s\n", change_root.path_cstr());
+    ret = false;
+  }
+  DEBUG_LOG;
+  // rc = (bool)(b_fs::remove_all(overlayfs_workdir.path_cstr()) != 0);
+  // if (!rc) {
+  //   output_internal("failed to remove %s\n", overlayfs_workdir.path_cstr());
+  //   ret = false;
+  // }
+  DEBUG_LOG;
+  rc = (bool)(b_fs::remove_all(tmp_root.path_cstr()) != 0);
+  if (!rc) {
+    output_internal("failed to remove %s\n", tmp_root.path_cstr());
+    ret = false;
   }
   return ret;
 }
@@ -786,7 +827,7 @@ UnionfsCstore::commitConfig(commit::PrioNode& node)
 {
   FsPath active_unionfs = active_root;
   active_unionfs.push(C_MARKER_UNIONFS);
-  
+
   // make a copy of current "work" dir
   try {
     if (path_exists(tmp_work_root)) {
@@ -798,8 +839,7 @@ UnionfsCstore::commitConfig(commit::PrioNode& node)
     }
     output_internal("cp[%s]->[%s]\n", work_root.path_cstr(),
                     tmp_work_root.path_cstr());
-
-    recursive_copy_dir(work_root, tmp_work_root, true);
+      recursive_copy_dir(work_root, tmp_work_root, true);
   } catch (const b_fs::filesystem_error& e) {
     output_internal("cp w->tw failed[%s]\n", e.what());
     return false;
@@ -808,17 +848,29 @@ UnionfsCstore::commitConfig(commit::PrioNode& node)
     return false;
   }
 
+  DEBUG_LOG;
+
   if (!construct_commit_active(node)) {
     return false;
   }
 
+  DEBUG_LOG;
+
   if (!do_umount(work_root)) {
     return false;
   }
+
+  DEBUG_LOG;
+
   if (b_fs::remove_all(change_root.path_cstr()) < 1) {
     output_internal("failed to remove [%s]\n", change_root.path_cstr());
     return false;
   }
+  if (b_fs::remove_all(overlayfs_workdir.path_cstr()) < 1) {
+    output_internal("failed to remove [%s]\n", overlayfs_workdir.path_cstr());
+    return false;
+  }
+
   /* note: unionfs can't cope with whole directory being removed, so just
    * remove the content.
    */
@@ -829,6 +881,7 @@ UnionfsCstore::commitConfig(commit::PrioNode& node)
   }
   try {
     b_fs::create_directories(change_root.path_cstr());
+    b_fs::create_directories(overlayfs_workdir.path_cstr());
     recursive_copy_dir(tmp_active_root, active_root, true);
   } catch (const b_fs::filesystem_error& e) {
     output_internal("cp ta->a failed[%s]\n", e.what());
@@ -837,7 +890,7 @@ UnionfsCstore::commitConfig(commit::PrioNode& node)
     output_internal("cp ta->a failed[unknown exception]\n");
     return false;
   }
-  if (!do_mount(change_root, active_root, work_root)) {
+  if (!do_mount(change_root, active_root, work_root, overlayfs_workdir)) {
     return false;
   }
   if (!sync_dir(tmp_work_root, work_root, work_root)) {
@@ -1644,107 +1697,38 @@ UnionfsCstore::find_line_in_file(const FsPath& file, const string& line)
 
 bool
 UnionfsCstore::do_mount(const FsPath& rwdir, const FsPath& rdir,
-                        const FsPath& mdir)
+                        const FsPath& mdir, const FsPath& workdir)
 {
-#ifdef USE_UNIONFSFUSE
-  const char *fusepath, *fuseprog;
-  const char *fuseoptinit;
-  const char *fuseopt1, *fuseopt2;
-  string mopts;
 
-  fusepath = "/usr/bin/unionfs-fuse";
-  fuseprog = "unionfs-fuse";
-  fuseoptinit = "-o";
-  fuseopt1 = "cow";
-  fuseopt2 = "allow_other";
-  mopts = rwdir.path_cstr();
-  mopts += "=RW:";
+  DEBUG_LOG;
+
+  string mopts = "rw,noatime";
+  mopts += ",lowerdir=";
   mopts += rdir.path_cstr();
-  mopts += "=RO";
-
-  if(pipe(commpipe)){
-    output_internal("Pipe error!\n");
-    return false;
-  }
-
-  if((pid = fork()) == -1) {
-    output_internal("*** ERROR: forking child process failed\n");
-    return false;
-  }
-
-  if(pid) {
-    dup2(commpipe[1],1);
-    close(commpipe[0]);
-    setvbuf(stdout,(char*)NULL,_IONBF,0);
-    wait(&status);
-  }
-  else {
-    dup2(commpipe[0],0);
-    close(commpipe[1]);
-    if (execl(fusepath, fuseprog, fuseoptinit, fuseopt1, fuseoptinit, fuseopt2, mopts.c_str(), mdir.path_cstr(), NULL) != 0) {
-        output_internal("union mount failed [%s][%s][%s]\n",
-                   strerror(errno), mdir.path_cstr(), mopts.c_str());
-        return false;
-    }
-  }
-#else
-  string mopts = "dirs=";
+  mopts += ",upperdir=";
   mopts += rwdir.path_cstr();
-  mopts += "=rw:";
-  mopts += rdir.path_cstr();
-  mopts += "=ro";
-  if (mount("unionfs", mdir.path_cstr(), "unionfs", 0, mopts.c_str()) != 0) {
-    output_internal("union mount failed [%s][%s]\n",
-                    strerror(errno), mdir.path_cstr());
+  mopts += ",workdir=";
+  mopts += workdir.path_cstr();
+
+  syslog(LOG_INFO, "mopts=%s mdir=%s", mopts.c_str(), mdir.path_cstr());
+
+  if (execl("/usr/bin/sudo", "sudo", "mount", "-t", "overlay", "overlay", "-o", mopts.c_str(), mdir.path_cstr(), NULL) != 0) {
+    output_internal("overlayfs mount failed [%s][%s][%s]\n",
+                    strerror(errno), mopts.c_str(), mdir.path_cstr());
     return false;
   }
-#endif
+
   return true;
 }
 
 bool
 UnionfsCstore::do_umount(const FsPath& mdir)
 {
-#ifdef USE_UNIONFSFUSE
-  const char *fusermount_path, *fusermount_prog;
-  const char *fusermount_umount;
-
-  fusermount_path = "/bin/fusermount";
-  fusermount_prog = "fusermount";
-  fusermount_umount = "-u";
-
-  if(pipe(commpipe)){
-    output_internal("Pipe error!\n");
-    return false;
-  }
-
-  if((pid = fork()) == -1) {
-    output_internal("*** ERROR: forking child process failed\n");
-    return false;
-  }
-
-  if(pid) {
-    dup2(commpipe[1],1);
-    close(commpipe[0]);
-    setvbuf(stdout,(char*)NULL,_IONBF,0);
-    wait(&status);
-  }
-  else {
-    dup2(commpipe[0],0);
-    close(commpipe[1]);
-    if (execl(fusermount_path, fusermount_prog, fusermount_umount, mdir.path_cstr(), NULL) != 0) {
-        output_internal("union umount failed [%s][%s]\n",
-                   strerror(errno), mdir.path_cstr());
-        return false;
-    }
-  }
-#else
   if (umount(mdir.path_cstr()) != 0) {
-    output_internal("union umount failed [%s][%s]\n",
+    output_internal("umount failed [%s][%s]\n",
                     strerror(errno), mdir.path_cstr());
     return false;
   }
-#endif
   return true;
 }
 
@@ -1794,7 +1778,17 @@ UnionfsCstore::remove_dir_content(const char *path)
   return true;
 }
 
+void
+UnionfsCstore::init_commit_data(void)
+{
+    DEBUG_LOG;
+    tmp_active_root = tmp_root;
+    tmp_work_root = tmp_root;
+    commit_marker_file = tmp_root;
+    tmp_active_root.push("active");
+    tmp_work_root.push("work");
+    commit_marker_file.push(C_COMMITTED_MARKER_FILE);
+}
+
 } // end namespace unionfs
 } // end namespace cstore
-
-

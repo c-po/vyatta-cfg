@@ -8,8 +8,8 @@ if USE_UNIONFSFUSE
 USE_UNIONFSFUSE = -DUSE_UNIONFSFUSE=1
 endif
 
-AM_CFLAGS = -I src -Wall $(GOBJECT_CFLAGS)
-AM_CXXFLAGS = -I src -Wall -Werror $(USE_UNIONFSFUSE)
+AM_CFLAGS = -I src -Wall $(GOBJECT_CFLAGS) -O0 -ggdb
+AM_CXXFLAGS = -I src -Wall -Werror $(USE_UNIONFSFUSE) -O0 -ggdb
 AM_CXXFLAGS += $(GOBJECT_CFLAGS)
 AM_YFLAGS = -d --name-prefix=yy_`basename $* .y`_
 AM_LFLAGS = --prefix=yy_`basename $* .l`_ -olex.yy.c

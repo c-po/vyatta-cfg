@@ -16,7 +16,7 @@ cfg_opts += --infodir=\$${prefix}/share/info
 cfg_opts += --enable-unionfsfuse
 cfg_opts += CFLAGS="$(CFLAGS)"
 cfg_opts += LDFLAGS="-Wl,-z,defs"
-cfg_opts += CXXFLAGS="$(CXXFLAGS)"
+cfg_opts += CXXFLAGS="$(CXXFLAGS) -O0 -ggdb3 -Wno-error=free-nonheap-object"
 inst_opts := --sourcedir=debian/tmp
 
 %:

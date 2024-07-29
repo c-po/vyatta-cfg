@@ -47,8 +47,7 @@ namespace unionfs { // begin namespace unionfs
 const string UnionfsCstore::C_ENV_TMPL_ROOT = "VYATTA_CONFIG_TEMPLATE";
 const string UnionfsCstore::C_ENV_WORK_ROOT = "VYATTA_TEMP_CONFIG_DIR";
 const string UnionfsCstore::C_ENV_OVERLAY_WORKDIR_ROOT = "VYATTA_OVERLAY_WORKDIR_TMP";
-const string UnionfsCstore::C_ENV_ACTIVE_ROOT
-  = "VYATTA_ACTIVE_CONFIGURATION_DIR";
+const string UnionfsCstore::C_ENV_ACTIVE_ROOT = "VYATTA_ACTIVE_CONFIGURATION_DIR";
 const string UnionfsCstore::C_ENV_CHANGE_ROOT = "VYATTA_CHANGES_ONLY_DIR";
 const string UnionfsCstore::C_ENV_TMP_ROOT = "VYATTA_CONFIG_TMP";
 
@@ -454,6 +453,8 @@ UnionfsCstore::setupSession()
       return false;
     }
 
+    DEBUG_LOG;
+
     // union mount
     if (!do_mount(change_root, active_root, work_root, overlayfs_workdir)) {
       return false;
@@ -490,7 +491,6 @@ UnionfsCstore::setupSession()
         current_pid = atoi(current_path.erase(current_path.find(config_match), config_match.length()).c_str());
 
         // umount only inactive config session directory, don't touch active sessions
-
         if (std::find(pids.begin(), pids.end(), current_pid) == pids.end()) {
           old_pids.push_back(current_pid);
           output_internal("found inactive config [%d]\n", current_pid);
@@ -567,11 +567,11 @@ UnionfsCstore::teardownSession()
     ret = false;
   }
   DEBUG_LOG;
-  // rc = (bool)(b_fs::remove_all(overlayfs_workdir.path_cstr()) != 0);
-  // if (!rc) {
-  //   output_internal("failed to remove %s\n", overlayfs_workdir.path_cstr());
-  //   ret = false;
-  // }
+  rc = (bool)(b_fs::remove_all(overlayfs_workdir.path_cstr()) != 0);
+  if (!rc) {
+    output_internal("failed to remove %s\n", overlayfs_workdir.path_cstr());
+    ret = false;
+  }
   DEBUG_LOG;
   rc = (bool)(b_fs::remove_all(tmp_root.path_cstr()) != 0);
   if (!rc) {
@@ -1699,10 +1699,10 @@ bool
 UnionfsCstore::do_mount(const FsPath& rwdir, const FsPath& rdir,
                         const FsPath& mdir, const FsPath& workdir)
 {
+  const char *fusepath = "/usr/bin/fuse-overlayfs";
+  const char *fuseprog = "fuse-overlayfs";
+  string mopts = "squash_to_gid=vyattacfg,noacl";
 
-  DEBUG_LOG;
-
-  string mopts = "rw,noatime";
   mopts += ",lowerdir=";
   mopts += rdir.path_cstr();
   mopts += ",upperdir=";
@@ -1710,24 +1710,71 @@ UnionfsCstore::do_mount(const FsPath& rwdir, const FsPath& rdir,
   mopts += ",workdir=";
   mopts += workdir.path_cstr();
 
-  syslog(LOG_INFO, "mopts=%s mdir=%s", mopts.c_str(), mdir.path_cstr());
-
-  if (execl("/usr/bin/sudo", "sudo", "mount", "-t", "overlay", "overlay", "-o", mopts.c_str(), mdir.path_cstr(), NULL) != 0) {
-    output_internal("overlayfs mount failed [%s][%s][%s]\n",
-                    strerror(errno), mopts.c_str(), mdir.path_cstr());
+  if(pipe(commpipe)){
+    output_internal("Pipe error!\n");
     return false;
   }
 
+  if((pid = fork()) == -1) {
+    output_internal("*** ERROR: forking child process failed\n");
+    return false;
+  }
+
+  if(pid) {
+    dup2(commpipe[1],1);
+    close(commpipe[0]);
+    setvbuf(stdout,(char*)NULL,_IONBF,0);
+    wait(&status);
+  }
+  else {
+    dup2(commpipe[0],0);
+    close(commpipe[1]);
+
+    output_internal("%s %s -o %s %s\n", fusepath, fuseprog, mopts.c_str(), mdir.path_cstr());
+
+    if (execl(fusepath, fuseprog, "-o", mopts.c_str(), mdir.path_cstr(), NULL) != 0) {
+        output_internal("%s mount failed [%s][%s][%s]\n", fuseprog,
+                   strerror(errno), mdir.path_cstr(), mopts.c_str());
+        return false;
+    }
+  }
   return true;
 }
 
 bool
 UnionfsCstore::do_umount(const FsPath& mdir)
 {
-  if (umount(mdir.path_cstr()) != 0) {
-    output_internal("umount failed [%s][%s]\n",
-                    strerror(errno), mdir.path_cstr());
+  const char *fusermount_path, *fusermount_prog;
+  const char *fusermount_umount;
+
+  fusermount_path = "/usr/bin/fusermount";
+  fusermount_prog = "fusermount";
+  fusermount_umount = "-u";
+
+  if(pipe(commpipe)){
+    output_internal("Pipe error!\n");
     return false;
+  }
+
+  if((pid = fork()) == -1) {
+    output_internal("*** ERROR: forking child process failed\n");
+    return false;
+  }
+
+  if(pid) {
+    dup2(commpipe[1],1);
+    close(commpipe[0]);
+    setvbuf(stdout,(char*)NULL,_IONBF,0);
+    wait(&status);
+  }
+  else {
+    dup2(commpipe[0],0);
+    close(commpipe[1]);
+    if (execl(fusermount_path, fusermount_prog, fusermount_umount, mdir.path_cstr(), NULL) != 0) {
+        output_internal("union umount failed [%s][%s]\n",
+                   strerror(errno), mdir.path_cstr());
+        return false;
+    }
   }
   return true;
 }
@@ -1776,18 +1823,6 @@ UnionfsCstore::remove_dir_content(const char *path)
     }
   }
   return true;
-}
-
-void
-UnionfsCstore::init_commit_data(void)
-{
-    DEBUG_LOG;
-    tmp_active_root = tmp_root;
-    tmp_work_root = tmp_root;
-    commit_marker_file = tmp_root;
-    tmp_active_root.push("active");
-    tmp_work_root.push("work");
-    commit_marker_file.push(C_COMMITTED_MARKER_FILE);
 }
 
 } // end namespace unionfs

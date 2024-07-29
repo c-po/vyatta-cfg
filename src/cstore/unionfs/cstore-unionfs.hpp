@@ -115,7 +115,16 @@ private:
   FsPath tmp_work_root;
   FsPath commit_marker_file;
 
-  void init_commit_data();
+  void init_commit_data()
+  {
+    tmp_active_root = tmp_root;
+    tmp_work_root = tmp_root;
+    commit_marker_file = tmp_root;
+    tmp_active_root.push("active");
+    tmp_work_root.push("work");
+    commit_marker_file.push(C_COMMITTED_MARKER_FILE);
+  }
+
   bool construct_commit_active(commit::PrioNode& node);
   bool mark_dir_changed(const FsPath& d, const FsPath& root);
   bool sync_dir(const FsPath& src, const FsPath& dst, const FsPath& root);
